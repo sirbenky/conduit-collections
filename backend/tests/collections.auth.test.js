@@ -46,9 +46,10 @@ describe("Collections: authentication", () => {
     async (route) => {
       //? This used to be a 500: verifyToken threw a SyntaxError and the
       //? error handler had no branch for it.
-      const res = await request(app)
-        [route.method](`/api/collections${concretePath(route.path)}`)
-        .set({ Authorization: "Token not-a-real-jwt" });
+      const url = `/api/collections${concretePath(route.path)}`;
+      const res = await request(app)[route.method](url).set({
+        Authorization: "Token not-a-real-jwt",
+      });
 
       expect(res.status).toBe(401);
     },
@@ -57,9 +58,10 @@ describe("Collections: authentication", () => {
   test.each(routes)(
     "$method $path is 401 when the Authorization header has no token",
     async (route) => {
-      const res = await request(app)
-        [route.method](`/api/collections${concretePath(route.path)}`)
-        .set({ Authorization: "Token" });
+      const url = `/api/collections${concretePath(route.path)}`;
+      const res = await request(app)[route.method](url).set({
+        Authorization: "Token",
+      });
 
       expect(res.status).toBe(401);
     },
