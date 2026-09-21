@@ -24,8 +24,12 @@ async function createUser(overrides = {}) {
 
   const token = await jwtSign({ username, email });
 
+  //? id is lifted out of the model so a factory result can be handed
+  //? straight to createArticle({ author }) or createCollection({ owner })
+  //? without remembering to unwrap .user first.
   return {
     user,
+    id: user.id,
     username,
     email,
     password,
