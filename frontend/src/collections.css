@@ -1,0 +1,175 @@
+/* ============================================================================
+ * COLLECTIONS
+ * ============================================================================
+ *
+ * Styles for the Collections screens. Everything here reuses the tokens and
+ * the measurements already in styles.css - there are no new colours, no new
+ * fonts and no new radii. The aim is that these screens look like they were
+ * always part of the app.
+ *
+ * The picker is scoped under .collection-picker rather than styling
+ * .dropdown-menu globally: the app has no .dropdown-menu rules of its own,
+ * and adding some would restyle the navbar user menu as a side effect.
+ * ============================================================================ */
+
+.collections-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.collections-header h1 {
+  margin: 0;
+}
+
+.collection-form {
+  padding: 1.5rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.collection-actions {
+  margin-top: 0.5rem;
+}
+
+.collection-confirm {
+  margin-top: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.collection-page .collection-description {
+  color: var(--text-muted);
+  font-weight: 300;
+  margin-bottom: 0.5rem;
+}
+
+/* Sits next to the favourite button in an article row, so it needs the same
+   right alignment and a little space away from it. */
+.article-preview .collection-remove {
+  margin-right: 0.5rem;
+}
+
+/* ----------------------------------------------------------------------------
+ * Save picker
+ * -------------------------------------------------------------------------- */
+
+.collection-picker {
+  position: relative;
+  display: inline-block;
+}
+
+.collection-picker-menu {
+  position: absolute;
+  right: 0;
+  z-index: 2;
+  min-width: 16rem;
+  max-width: 20rem;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  text-align: left;
+  white-space: normal;
+  background-color: #fff;
+  border: 1px solid var(--border);
+  /* Same radius and shadow the app already uses on .card */
+  border-radius: 0.75rem;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.collection-picker-message {
+  margin: 0;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+
+.collection-picker-error {
+  margin-bottom: 0.5rem;
+  padding-left: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.collection-picker-list {
+  max-height: 14rem;
+  margin: 0 0 0.25rem 0;
+  overflow-y: auto;
+}
+
+.collection-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem;
+  font-size: 0.95rem;
+  color: var(--text);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.collection-picker-row:hover:not(:disabled) {
+  background-color: var(--bg-light);
+}
+
+/* index.css sets `button:focus { outline: 0 !important }`, so the focus ring
+   has to be drawn with box-shadow or keyboard users get nothing. */
+.collection-picker-row:focus-visible {
+  box-shadow: 0 0 0 2px var(--brand);
+}
+
+.collection-picker-row:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.collection-picker-row[aria-pressed="true"] {
+  color: var(--brand);
+}
+
+.collection-picker-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-picker-count {
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-light);
+}
+
+.collection-picker-new {
+  width: 100%;
+}
+
+.collection-picker-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+/* On a phone the article buttons wrap, and a right-anchored menu can end up
+   off-screen. Full width inside the container keeps it reachable. */
+@media (max-width: 767px) {
+  .collection-picker {
+    position: static;
+  }
+
+  .collection-picker-menu {
+    left: 0;
+    right: 0;
+    min-width: 0;
+    max-width: none;
+  }
+}
