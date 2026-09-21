@@ -16,10 +16,15 @@ class NotFoundError extends MyError {
   }
 }
 class UnauthorizedError extends MyError {
-  constructor() {
-    super("You need to login first!");
+  constructor(message = "You need to login first!") {
+    super(message);
   }
 }
+
+//? 409, for a request that is valid but conflicts with what is already
+//? stored - saving an article into a collection that already holds it.
+//? Retrying will not help, so it is not a 422.
+class ConflictError extends MyError {}
 
 class ValidationError extends MyError {}
 
@@ -37,6 +42,7 @@ class AlreadyTakenError extends ValidationError {
 
 module.exports = {
   AlreadyTakenError,
+  ConflictError,
   FieldRequiredError,
   ForbiddenError,
   NotFoundError,
