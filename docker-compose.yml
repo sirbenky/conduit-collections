@@ -1,0 +1,25 @@
+# Local Postgres for development and tests. Values come from the root .env
+# (copy .env.example). This container is a throwaway for local work only, so
+# the example password is a placeholder, not a credential that guards anything.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: conduit-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-conduit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-conduit}
+      POSTGRES_DB: ${POSTGRES_DB:-conduit_development}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - conduit-pgdata:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-conduit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  conduit-pgdata:
