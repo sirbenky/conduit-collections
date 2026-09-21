@@ -116,7 +116,7 @@ function CollectionDetail() {
             <div className="article-preview">
               <p>Couldn&apos;t load this collection.</p>
               <button
-                className="btn btn-sm btn-outline-secondary"
+                className="btn btn-sm btn-outline-primary"
                 onClick={() => setPage((current) => current)}
               >
                 Try again

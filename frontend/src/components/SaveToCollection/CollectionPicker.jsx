@@ -117,7 +117,7 @@ function CollectionPicker({ onSaved, slug }) {
     return (
       <div className="collection-picker-message">
         <p>Couldn&apos;t load your collections.</p>
-        <button className="btn btn-sm btn-outline-secondary" onClick={reload}>
+        <button className="btn btn-sm btn-outline-primary" onClick={reload}>
           Try again
         </button>
       </div>
@@ -190,7 +190,7 @@ function CollectionPicker({ onSaved, slug }) {
         </form>
       ) : (
         <button
-          className="btn btn-sm btn-outline-secondary collection-picker-new"
+          className="btn btn-sm btn-outline-primary collection-picker-new"
           onClick={() => setCreating(true)}
           type="button"
         >

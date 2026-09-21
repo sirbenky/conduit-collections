@@ -92,7 +92,7 @@ function Collections() {
             <div className="article-preview">
               <p>Couldn&apos;t load your collections.</p>
               <button
-                className="btn btn-sm btn-outline-secondary"
+                className="btn btn-sm btn-outline-primary"
                 onClick={reload}
               >
                 Try again
