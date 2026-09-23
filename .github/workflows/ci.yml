@@ -3,6 +3,10 @@ name: CI
 on:
   push:
   pull_request:
+  # Lets a reviewer re-run the checks from the Actions tab without having to
+  # push a commit - useful when a run is cancelled or fails for a reason
+  # outside the code, such as a runner or account issue.
+  workflow_dispatch:
 
 # Read-only: nothing in this workflow writes to the repository.
 permissions:
