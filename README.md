@@ -14,6 +14,7 @@ in this repository.
 
 ## Contents
 
+- [The documents in this repository](#the-documents-in-this-repository)
 - [What was added](#what-was-added)
 - [Running it](#running-it)
 - [Tests](#tests)
@@ -24,6 +25,17 @@ in this repository.
 - [AI usage](#ai-usage)
 
 ---
+
+## The documents in this repository
+
+Four, each with a different job. Start with this one.
+
+| File | What it is for |
+| --- | --- |
+| `README.md` | How to run it, the API, the decisions, what was fixed in the starter repo, and the known limitations |
+| `DESIGN_NOTE.md` | The data model and API reasoning, how reads stay efficient at scale, caching, monitoring, and the trade-off made for the time box |
+| `CODEBASE.md` | A walkthrough for anyone reviewing or continuing the work: a request traced end to end, the security boundaries and what proves each one, the debugging notes, and recipes for the likely next changes |
+| `CLAUDE.md` | The working rules for the repository - commands, conventions, and the constraints that must not be relaxed. Written as guidance for an AI coding assistant, and equally the onboarding notes for a person |
 
 ## What was added
 

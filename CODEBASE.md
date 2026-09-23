@@ -703,8 +703,9 @@ since what a 409 means is specific to each endpoint.
 
 **Chose** did not fix the N+1 in `/api/articles`, did not change its page-based
 `offset`, did not fix the seeder's plaintext passwords.
-**Why** the brief says not to break existing behaviour and warns against
-unrelated rewrites. The frontend depends on the `offset` semantics today.
+**Why** this is an existing application with existing users, and the scope of
+the work was one new feature rather than a cleanup. The frontend depends on the
+`offset` semantics today.
 **How it stays honest** a characterization test pins the `offset` behaviour, so
 the inconsistency is a recorded decision rather than an oversight, and every
 deviation is listed in the README.
