@@ -3,7 +3,16 @@ import ArticleMeta from "../ArticleMeta";
 import ArticleTags from "../ArticleTags";
 import FavButton from "../FavButton";
 
-function ArticlesPreview({ articles, loading, updateArticles }) {
+//? onRemove is optional and only the collection detail page passes it. When
+//? it is absent this renders exactly as it did before, so the home, profile
+//? and favourites feeds are untouched.
+function ArticlesPreview({
+  articles,
+  loading,
+  onRemove,
+  removingSlug,
+  updateArticles,
+}) {
   const handleFav = (article) => {
     const items = [...articles];
 
@@ -19,6 +28,16 @@ function ArticlesPreview({ articles, loading, updateArticles }) {
       return (
         <div className="article-preview" key={article.slug}>
           <ArticleMeta author={article.author} createdAt={article.createdAt}>
+            {onRemove && (
+              <button
+                className="btn btn-sm btn-outline-danger pull-xs-right collection-remove"
+                disabled={removingSlug === article.slug}
+                onClick={() => onRemove(article.slug)}
+                type="button"
+              >
+                {removingSlug === article.slug ? "Removing..." : "Remove"}
+              </button>
+            )}
             <FavButton
               favorited={article.favorited}
               favoritesCount={article.favoritesCount}

@@ -31,7 +31,7 @@ function ProfileFavArticles() {
       />
     </>
   ) : (
-    <div className="article-preview">{username} doesn't have favorites.</div>
+    <div className="article-preview">{username} doesn&apos;t have favorites.</div>
   );
 }
 

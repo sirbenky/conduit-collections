@@ -5,10 +5,13 @@ import App from "./App";
 import AuthProvider from "./context/AuthContext";
 import "./styles.css";
 import "./index.css";
+import "./collections.css";
 import reportWebVitals from "./reportWebVitals";
 import Article from "./routes/Article/Article";
 import CommentsSection from "./routes/Article/CommentsSection";
 import ArticleEditor from "./routes/ArticleEditor";
+import CollectionDetail from "./routes/Collections/CollectionDetail";
+import Collections from "./routes/Collections";
 import Home from "./routes/Home";
 import HomeArticles from "./routes/HomeArticles";
 import Login from "./routes/Login";
@@ -33,6 +36,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(
             <Route path="register" element={<SignUp />} />
 
             <Route path="settings" element={<Settings />} />
+
+            <Route path="collections" element={<Collections />} />
+            <Route path="collections/:id" element={<CollectionDetail />} />
 
             <Route path="editor" element={<ArticleEditor />}>
               <Route path=":slug" element={<ArticleEditor />} />

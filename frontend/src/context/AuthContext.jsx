@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import getUser from "../services/getUser";
 
-const AuthContext = createContext();
+//? Exported so tests can supply an auth state directly. AuthProvider reads
+//? localStorage at module load, which a test cannot get in front of.
+export const AuthContext = createContext();
 
 export function useAuth() {
   return useContext(AuthContext);

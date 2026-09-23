@@ -17,7 +17,11 @@ function Article() {
   const { slug } = useParams();
 
   useEffect(() => {
-    if (state) return;
+    //? Was `if (state) return`. List endpoints do not send the article body
+    //? - the collection one leaves it out on purpose - so an article opened
+    //? from a list has state but nothing to render. Fetch whenever the body
+    //? is what is missing.
+    if (state?.body) return;
 
     getArticle({ slug, headers })
       .then(setArticle)

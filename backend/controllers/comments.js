@@ -67,7 +67,10 @@ const deleteComment = async (req, res, next) => {
     const { loggedUser } = req;
     if (!loggedUser) throw new UnauthorizedError();
 
-    const { slug, commentId } = req.params;
+    //? Only commentId is used. The :slug in the path is not checked against
+    //? the comment's article - noted in the README. Ownership is still
+    //? enforced below, so this is untidy rather than a hole.
+    const { commentId } = req.params;
 
     const comment = await Comment.findByPk(commentId);
     if (!comment) throw new NotFoundError("Comment");

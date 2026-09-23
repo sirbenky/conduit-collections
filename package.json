@@ -16,14 +16,29 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently --names 'Node,Vite' -c 'green,blue' 'npm run dev -w backend' 'npm run dev -w frontend'",
-    "sqlz": "npx -w backend sequelize-cli",
+    "dev": "concurrently --names Node,Vite -c green,blue \"npm run dev -w backend\" \"npm run dev -w frontend\"",
     "start": "npm run build -w frontend && npm run start -w backend",
-    "test": "vitest"
+    "sqlz": "npx -w backend sequelize-cli",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:backend": "vitest run --project backend",
+    "test:frontend": "vitest run --project frontend",
+    "test:e2e": "playwright test",
+    "db:migrate": "npm run sqlz -- db:migrate",
+    "db:migrate:undo": "npm run sqlz -- db:migrate:undo:all",
+    "db:seed": "npm run sqlz -- db:seed:all"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.63.0",
     "@vitejs/plugin-react-swc": "^4.2.3",
     "concurrently": "^9.2.1",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "jsdom": "^29.1.1",
     "vitest": "^4.0.18"
   }
 }
