@@ -1,111 +1,214 @@
 # Codebase guide
 
-A working explanation of how the collections feature fits into this
-application: what runs where, why it is built this way, what it costs, and
-how to change it safely.
+How the collections feature works, followed from the button a user clicks all
+the way down to the database and back.
 
-Written for a senior engineer who has not worked on this code and needs to
-review it, debug it, or continue it.
+Written for an engineer who has not seen this code and needs to review it,
+debug it, or build on it.
 
-> **Keep this current.** Every claim here is meant to be checkable against the
-> code as it stands. Deliberately **no line numbers** — they rot. References
-> are file plus function name, which survive edits. When behaviour changes,
-> change the matching section in the same commit, and re-run the measurements
-> in [Evidence](#evidence) rather than copying the old numbers forward.
+> **Keep this current.** Everything here should be checkable against the code
+> as it stands. There are no line numbers on purpose, because they go stale;
+> references are file plus function name instead. If you change how something
+> works, change the matching part of this file in the same commit, and re-run
+> the measurements in [Evidence](#8-evidence) rather than copying the old
+> numbers forward.
 
 ---
 
 ## Contents
 
-1. [Sixty-second orientation](#1-sixty-second-orientation)
-2. [Walkthrough: one request, end to end](#2-walkthrough-one-request-end-to-end)
-3. [The data model](#3-the-data-model)
-4. [The security model](#4-the-security-model)
-5. [Query cost, and why it stays flat](#5-query-cost-and-why-it-stays-flat)
-6. [Frontend state](#6-frontend-state)
-7. [Trade-offs](#7-trade-offs)
-8. [Debugging playbook](#8-debugging-playbook)
-9. [Making a small change](#9-making-a-small-change)
-10. [Evidence](#10-evidence)
-11. [Where the bodies are buried](#11-where-the-bodies-are-buried)
+1. [What the feature is](#1-what-the-feature-is)
+2. [Journey one: saving an article](#2-journey-one-saving-an-article)
+3. [Journey two: opening a collection](#3-journey-two-opening-a-collection)
+4. [Journey three: creating and deleting](#4-journey-three-creating-and-deleting)
+5. [The ground underneath](#5-the-ground-underneath)
+6. [Why it is built this way](#6-why-it-is-built-this-way)
+7. [When something breaks](#7-when-something-breaks)
+8. [Evidence](#8-evidence)
+9. [Changing it](#9-changing-it)
+10. [What is not done](#10-what-is-not-done)
 
 ---
 
-## 1. Sixty-second orientation
+## 1. What the feature is
 
-The application is a Conduit/RealWorld blog: users, articles, comments,
-tags, favourites, follows. This work adds **private collections** — named
-lists of articles that only the owner can see or modify.
+The app is a Conduit/RealWorld blog. It already had users, articles,
+comments, tags, favourites and follows. This work adds **collections**: named
+lists of articles that belong to one person and that nobody else can see or
+change.
 
-The layering, back to front:
+A signed-in user can make a collection, rename it, delete it, and save
+articles into it from any article page. The same article cannot go into the
+same collection twice.
 
-```
-routes/collections.js        auth on the router, path → controller
-  controllers/collections.js HTTP: read the request, choose a status code
-    services/collections.js  the queries, the rules, the validation
-      models/                Sequelize
-        migrations/          the schema, which is the real contract
-```
-
-Frontend, front to back:
+Here is the whole feature as a map. You will walk each of these paths in the
+next three sections.
 
 ```
-routes/Collections/          pages: list and detail
-components/SaveToCollection/ the picker, reached from any article page
-  hooks/useCollections.js    data + loading + error + reload
-    services/*.js            one file per API call
-      helpers/errorHandler   turns an axios failure into a thrown string
+Browser                                Server                      Database
+───────────────────────────────────────────────────────────────────────────
+SaveToCollection  ─── POST ──▶  routes/collections.js
+  CollectionPicker                  auth on the router
+    services/*.js                 controllers/collections.js
+      errorHandler                    services/collections.js ──▶ Postgres
+                                        owner in every WHERE     constraints
+Collections page  ─── GET ───▶      models/                      indexes
+  useCollections                                                 migrations
+CollectionDetail  ─── GET ───▶
+  useCollectionArticles
 ```
 
-**The three sentences that explain most of the design:**
+Three ideas explain most of the design. Each one shows up in a journey below.
 
-1. Every collection query carries the owner's id in its `WHERE` clause, and
-   that id always comes from a verified token — never from the request.
-2. The two invariants that matter (no duplicate article in a collection, no
-   two collections with the same name per user) are enforced by database
-   constraints, not by application checks, because application checks lose
-   races.
-3. Reading a page of a collection costs a fixed number of queries no matter
-   how many articles are on it.
+1. **The owner is always in the query, never checked afterwards.** Every
+   collection query says `where: { id, userId }`, and that `userId` comes from
+   a verified token, never from the request.
+2. **The database enforces the rules that matter.** No duplicate article in a
+   collection, no two collections with the same name per user. Both are
+   constraints, not application checks, because application checks lose races.
+3. **Reading a page costs a fixed number of queries.** It does not matter
+   whether the page holds one article or fifty.
 
-## 2. Walkthrough: one request, end to end
+---
 
-Take `POST /api/collections/:id/articles` — saving an article. It touches
-every layer and every rule.
+## 2. Journey one: saving an article
 
-### The request arrives
+This is the fullest path in the feature. It starts in the browser and touches
+every layer. Follow it once and the rest of the codebase makes sense.
 
-`backend/app.js` mounts `/api/collections` on the collections router. Note
-that `app.js` only *builds* the app; `index.js` calls `listen()`. That split
-exists so Supertest can `require("../app")` without binding a port — the
-original code did both in one file, which is why the project had no API
-tests.
+### The user clicks Save
 
-### Authentication, once, for the whole router
+`components/SaveToCollection/SaveToCollection.jsx` renders the button. It sits
+inside `ArticlesButtons`, which is the existing component that already holds
+Follow, Favourite and the author's Edit and Delete buttons. Putting Save there
+means it appears wherever those buttons already appear, and it renders nothing
+at all for a signed-out visitor.
 
-`backend/routes/collections.js`:
+Clicking it opens the picker. Note *how* it opens:
+
+```jsx
+{open && (
+  <div className="collection-picker-menu">
+    <CollectionPicker onSaved={...} slug={slug} />
+  </div>
+)}
+```
+
+`CollectionPicker` is only mounted while the menu is open. That is deliberate.
+`ArticlesButtons` renders **twice** on an article page, once in the banner and
+once in the footer. If the picker held its own copy of "which collections
+already have this article", the two copies would disagree the moment you used
+one of them. Mounting on open means it always asks the server fresh. There is
+a test for this that opens the picker twice and counts the requests.
+
+### The picker asks what is already saved
+
+`CollectionPicker` calls `useCollections({ articleSlug: slug })`, which calls
+`services/getCollections.js`, which requests:
+
+```
+GET /api/collections?article=how-to-train-your-dragon
+```
+
+The `?article=` part matters. Without it the picker would know your
+collections but not which ones already contain this article, and it would need
+one extra request per collection to find out. With it, the server answers both
+questions at once.
+
+### The server answers, cheaply
+
+`services/collections.js` → `listCollections` first turns the slug into an
+article id with one small query, then builds the list:
+
+```js
+// Abbreviated - hasArticle and replacements are only added when ?article= was sent.
+attributes: [
+  "id", "name", "description", "createdAt", "updatedAt",
+  [sequelize.literal(ARTICLE_COUNT), "articlesCount"],
+  [sequelize.literal(HAS_ARTICLE), "hasArticle"],
+],
+where: { userId },
+replacements: { articleId },
+```
+
+`ARTICLE_COUNT` and `HAS_ARTICLE` are `SELECT` subqueries. The article id goes
+in through `replacements`, not string concatenation, so the shape of the SQL
+never depends on anything a user sent.
+
+`where: { userId }` is the first appearance of idea number one. This query
+cannot return somebody else's collection, so there is no ownership check to
+write and no way to forget to write it.
+
+If the slug matches no article, `HAS_ARTICLE` is replaced by the literal
+`FALSE` rather than a subquery. A slug that does not exist means "in none of
+them", which is a correct answer, not an error.
+
+### The user clicks a collection, and the UI moves first
+
+Back in `CollectionPicker` → `handleToggle`. The tick appears immediately,
+before the server has replied:
+
+```js
+const wasSaved = Boolean(collection.hasArticle);
+setCollections(previous => previous.map(item =>
+  item.id === collection.id
+    ? { ...item, hasArticle: !wasSaved, articlesCount: item.articlesCount + (wasSaved ? -1 : 1) }
+    : item));
+```
+
+This is an optimistic update. A tick that lags behind the cursor feels broken,
+so the UI guesses and corrects itself afterwards. `wasSaved` is captured
+*before* the guess, which is what makes the correction possible: if the
+request fails, the `catch` block puts both the tick and the count back exactly
+as they were, and shows the error.
+
+Forms elsewhere in this feature do the opposite and wait for the server.
+Section 4 explains why they differ.
+
+### The request goes out
+
+`services/toggleCollectionArticle.js` sends:
+
+```
+POST /api/collections/:id/articles     { "article": { "slug": "..." } }
+```
+
+Add and remove live in one service function because the picker is a toggle and
+because the two "already in that state" cases belong together. That will
+matter in a moment.
+
+### It arrives, and is authenticated once
+
+`app.js` mounts the router. Note that `app.js` only *builds* the Express app —
+`index.js` is the only file that calls `listen()`. They were one file
+originally, which is why the project had no API tests: you cannot import a
+module that starts a server. Splitting them is what lets Supertest do
+`require("../app")`.
+
+`routes/collections.js` starts with:
 
 ```js
 router.use(verifyToken, requireAuth);
 ```
 
-This is on the **router**, not on each route. `verifyToken` (in
-`middleware/authentication.js`) identifies the caller if a token is present
-and leaves `req.loggedUser` undefined if not — public routes elsewhere depend
-on that. `requireAuth` then rejects anyone still anonymous.
+Auth is on the **router**, not on each route. `verifyToken` identifies the
+caller if a token is present and leaves `req.loggedUser` undefined if not,
+because public routes elsewhere in the app rely on that behaviour.
+`requireAuth` then rejects anyone still anonymous.
 
-Router-level attachment is a deliberate choice: a route added below inherits
-the check instead of relying on whoever adds it. `tests/collections.auth.test.js`
-reads the route table out of the router object itself and asserts every entry
-401s, so a new route is covered the moment it exists.
+Attaching it once means a route added below inherits the check automatically,
+instead of depending on whoever adds it to remember. To stop that guarantee
+rotting, `tests/collections.auth.test.js` reads the route table out of the
+router object itself and asserts that every entry returns 401. Add a route,
+and it is covered before you have written a test for it.
 
-Two bugs were fixed in `verifyToken` along the way: a malformed header threw
-a `SyntaxError` that the error handler had no branch for (a 500 for what is
-plainly a client error), and a token for a deleted user called `next()` twice
-because of a missing `return`, so Express ran both the error handler and the
-route handler.
+Two bugs in `verifyToken` were fixed on the way past. A malformed header threw
+a `SyntaxError` that the error handler had no branch for, so a plainly
+client-side mistake came back as a 500. And a token belonging to a
+since-deleted user called `next()` twice, because of a missing `return`, so
+Express ran the route handler *and* the error handler.
 
-### The controller
+### The controller does almost nothing
 
 `controllers/collections.js` → `addArticle`:
 
@@ -118,41 +221,66 @@ const collection = await collections.addArticle({
 res.status(201).json({ collection });
 ```
 
-The controller does three things: pull values out of the request, call the
-service, pick a status code. **`userId` comes from `req.loggedUser`** — set
-by `verifyToken` from a signature-verified token. No controller in this
-feature reads an owner id from params, query or body, so there is nothing for
-a client to substitute. Two tests plant a `userId` in the body on create and
-on update and assert it is ignored.
+Three jobs: read the request, call the service, choose a status code. No
+queries here, and no business rules.
 
-### The service
+The important line is the first one. `userId` comes from `req.loggedUser`,
+which `verifyToken` set from a signature-verified token. **No controller in
+this feature reads an owner id from params, query or body.** There is
+therefore nothing for a client to substitute. Two tests put a `userId` in the
+request body, on create and on update, and check it is ignored.
 
-`services/collections.js` → `addArticle` does the real work:
+### The service finds the collection, scoped to you
 
-**1. Find the collection, scoped to the owner.** Via `findOwnedCollection`:
+`services/collections.js` → `addArticle` starts by calling
+`findOwnedCollection`:
 
 ```js
+// Abbreviated - the real call also lists the attributes to select.
 if (!isUuid(id)) throw new NotFoundError("Collection");
 const collection = await Collection.findOne({ where: { id, userId } });
 if (!collection) throw new NotFoundError("Collection");
 ```
 
-Three things are happening:
+Three separate things are happening in those three lines.
 
-- The UUID is validated *before* it reaches Postgres. A malformed UUID makes
-  Postgres raise a type error, which would surface as a 500 and hand the
-  caller a database message.
-- `userId` is in the `WHERE` clause. The query **cannot** return another
-  user's row, so there is no ownership comparison to get wrong and no window
-  between a read and a check.
-- A collection that exists but is not yours produces exactly the same
-  `NotFoundError` as one that does not exist. A 403 would confirm the id is
-  real, which over private data is an enumeration oracle.
+**The UUID is checked before Postgres sees it.** Hand Postgres a malformed
+UUID and it raises a type error, which would surface as a 500 with a database
+message attached. Checking first turns it into a 404.
 
-**2. Resolve the slug to an article id.** Memberships point at `articleId`,
-not the slug, so renaming an article does not lose it from collections.
+**The owner is in the `WHERE` clause.** The query is incapable of returning
+another user's row. Compare that with the version you might write by instinct:
 
-**3. Insert, and let the database reject a duplicate:**
+```js
+// Not what this codebase does, and why:
+const collection = await Collection.findByPk(id);
+if (collection.userId !== req.loggedUser.id) throw new ForbiddenError();
+```
+
+That version reads somebody else's row into memory and then relies on a
+comparison to throw it away. Two problems: the comparison can be forgotten or
+written wrong, and the 403 it throws confirms the collection exists.
+
+**Someone else's collection and a missing one look identical.** A collection
+that exists but is not yours produces exactly the same `NotFoundError` as one
+that never existed. A 403
+would tell an attacker "this id is real, just not yours", which is a yes/no
+oracle they can run over any id they like. Articles keep 403, because they are
+public and there is nothing to hide about whether they exist.
+
+### The slug becomes an article id
+
+```js
+const article = await Article.findOne({ attributes: ["id"], where: { slug } });
+```
+
+Memberships point at `articleId`, never at the slug. Slugs are derived from
+titles, so editing a title changes the slug. Storing the id means a saved
+article survives being renamed.
+
+### The database decides about duplicates
+
+This is the part most worth understanding.
 
 ```js
 await rejectDuplicate(
@@ -161,474 +289,572 @@ await rejectDuplicate(
 );
 ```
 
-This is the part worth dwelling on. Sequelize generates
-`collection.addArticle()` for a `belongsToMany`, and it is the obvious thing
-to reach for — but it issues a `SELECT` first and **silently skips** a row
-that already exists. That means a duplicate save returns success, and two
-concurrent saves can both pass the `SELECT` before either `INSERT`s.
+Sequelize generates `collection.addArticle()` for a `belongsToMany`
+relationship, and it is the obvious thing to reach for. Do not. It runs a
+`SELECT` first and **silently skips** a row that already exists. Two
+consequences: a duplicate save reports success, and two requests arriving
+together can both pass the `SELECT` before either one `INSERT`s.
 
-Writing through the join model instead means the composite primary key
-`(collectionId, articleId)` decides. `rejectDuplicate` catches Sequelize's
-`UniqueConstraintError` and rethrows a `ConflictError`, which the error
-handler maps to 409. `tests/collections.membership.test.js` fires two adds
-with `Promise.all` and asserts exactly one 201, one 409, one row — and
-separately asserts a raw `INSERT` is rejected, proving the rule is in the
-database rather than in the service.
+Writing through the join model instead lets the composite primary key
+`(collectionId, articleId)` make the decision. `rejectDuplicate` catches
+Sequelize's `UniqueConstraintError` and rethrows a `ConflictError`.
 
-### The error handler
+Two tests hold this down. One fires two adds with `Promise.all` and asserts
+exactly one 201, one 409, and one row. The other bypasses the ORM entirely
+with a raw `INSERT` and checks the database rejects it, which proves the rule
+lives in the schema rather than in the service.
 
-`middleware/errorHandler.js` maps an error class to a status:
-`UnauthorizedError` and the jsonwebtoken errors to 401, `ForbiddenError` 403,
-`NotFoundError` 404, `ConflictError` and `SequelizeUniqueConstraintError` 409,
-`ValidationError` 422, everything else 500.
+### The error becomes a status code
 
-It logs the error's **name, message and stack** — not the object. A Sequelize
-error carries the failing SQL and its bound parameters in enumerable fields,
-which is how password hashes and tokens end up in log aggregators. 500
-responses return a generic message rather than echoing the internal one.
+`middleware/errorHandler.js` maps error type to status: 401 for
+`UnauthorizedError` and the three jsonwebtoken errors, 403 for
+`ForbiddenError`, 404 for `NotFoundError`, 409 for `ConflictError` and
+`SequelizeUniqueConstraintError`, 422 for validation, 500 for anything else.
 
-### Back on the client
+It logs the error's **name, message and stack**, not the error object. That is
+not fussiness. A Sequelize error carries the failing SQL and its bound
+parameters in ordinary enumerable fields, so logging the object writes
+password hashes and tokens into your log aggregator. For the same reason, a
+500 returns a generic message instead of echoing the internal one.
 
-`services/toggleCollectionArticle.js` made the call. It inspects the status
-before delegating to the shared handler:
+So the response is `409 { "errors": { "body": ["That article is already in this collection."] } }`.
+
+### The client decides a 409 is a success
+
+Back in `services/toggleCollectionArticle.js`:
 
 ```js
-if (!saved && status === 409) return { saved: true, alreadyDone: true };
+if (!saved && status === 409) return { saved: true,  alreadyDone: true };
 if (saved && status === 404) return { saved: false, alreadyDone: true };
 ```
 
-A 409 on add means the article is already there; a 404 on remove means it is
-already gone. Either way the server is in the state the user asked for, so
-these are successes, not errors — which is what makes a double click, or the
-same article saved in a second tab, converge instead of showing an error for
-something that worked.
+A 409 on add means the article is already there. A 404 on remove means it is
+already gone. In both cases the server is in the state the user asked for, so
+treating them as errors would be wrong. This is what makes a double click, or
+the same article saved in a second browser tab, settle down quietly instead of
+showing a failure for something that worked.
 
-That semantic judgement lives in the service that knows the endpoint, not in
-the shared `errorHandler`, which has no business knowing what a 409 means
-here.
+Notice where that judgement lives: in the service that knows this endpoint,
+not in the shared `errorHandler`. The shared handler has no business knowing
+what a 409 means here, because it means something different everywhere else.
 
-## 3. The data model
+### Everything else throws
+
+`helpers/errorHandler.js` now throws on every failure. It used to rethrow only
+for 401, 403, 404, 422 and 500. Anything else — a 409, a 400, a dropped
+connection — was logged and swallowed, so the calling service resolved
+`undefined` and the screen carried on as though the request had worked. A save
+that silently did nothing is the worst failure mode available.
+
+It throws a plain **string**, not an `Error`. That looks wrong until you look
+at the callers: `AuthPageContainer`, `ArticleEditorForm` and `Login` all
+render the thrown value straight into JSX with `<li>{error}</li>`, and React
+refuses to render an `Error` object. The constraint is inherited from the
+starter app, not chosen.
+
+### The UI settles
+
+`handleToggle` takes the `saved` value the service reports and writes *that*
+into state, rather than keeping its optimistic guess. When the guess was wrong
+— a 409 meaning it was already saved — the UI ends up correct anyway. The
+button label flips from Save to Saved, and the E2E test uses exactly that flip
+as its signal that the write came back, which is why it contains no fixed
+waits.
+
+---
+
+## 3. Journey two: opening a collection
+
+The second path is a read. It is shorter, and its whole point is what it costs.
+
+### The page loads
+
+`routes/Collections/CollectionDetail.jsx` makes two requests: one for the
+collection itself, one for the first page of its articles via
+`useCollectionArticles`.
+
+That hook, and `useCollections` beside it, are modelled on the app's existing
+`useArticles` with two additions.
+
+**They have an error state.** `useArticles` does `.catch(console.error)`, so a
+failed load renders as an empty list. "You have no collections" and "we could
+not load your collections" then look identical to the user, which is a bad way
+to find out your API is down. Both new hooks tell them apart, and there are
+tests for each state.
+
+**They ignore stale responses.** Each effect sets `let current = true` and
+flips it in its cleanup:
+
+```js
+return () => { current = false; };
+```
+
+Only the newest effect can write to state. Without this, a slow response for
+page 2 that lands after page 3 would put page 2's rows on screen while the
+pager still reads 3.
+
+### The server reads one page, and no more queries than that
+
+`services/collections.js` → `listArticles` scopes the collection to the owner
+again, counts the memberships, then hands off to `loadArticlePage`, which is
+the interesting function.
+
+The obvious way to build this response is to fetch the page and then, for each
+article, fetch its tags, its favourite count, whether you favourited it, and
+whether you follow the author. That is what the app's existing
+`/api/articles` handler does, at roughly six queries per article.
+
+Measured on this machine:
+
+| Endpoint | page of 1 | page of 20 |
+| --- | --- | --- |
+| `GET /api/articles` (existing) | 9 | **123** |
+| `GET /api/collections/:id/articles` | 7 | **7** |
+
+`loadArticlePage` gets there like this:
+
+1. **One** query for the page of memberships, joined to their articles and
+   authors, ordered and limited.
+2. Return early if the page is empty, so no `IN ()` with nothing in it is ever
+   built.
+3. Collect the article ids and the distinct author ids from that page.
+4. **Three** queries in parallel, each covering the whole page at once:
+   - tags: `WHERE "articleId" IN (:articleIds)`
+   - favourites: `COUNT(*)` and `BOOL_OR("userId" = :loggedUserId)`, grouped
+     by article
+   - follows: the same shape over `Followers`, grouped by author
+5. Index those into `Map`s and assemble the response.
+
+`BOOL_OR` earns its place: it answers "how many favourites" and "did *I*
+favourite it" in one aggregate, instead of one query for the count and another
+for the membership.
+
+Those three are raw SQL because `Favorites`, `Followers` and `TagList` have no
+Sequelize models — they are string-through join tables. Every value is bound
+through `replacements`. Nothing is interpolated.
+
+The ordering is `(createdAt DESC, articleId DESC)`. The second key is not
+decoration. Without it, two articles saved in the same millisecond can swap
+places between one request and the next, so one appears on both pages and the
+other on neither.
+
+A test spies on `sequelize.query` and asserts the count for a 1-article page
+equals the count for a 20-article page. That is the tripwire for anyone who
+later adds a convenient `await article.getTagList()` inside the loop.
+
+### The response is built by hand
+
+```js
+return {
+  slug, title, description, createdAt,
+  tagList, favorited, favoritesCount,
+  author: { username, bio, image, following, followersCount },
+};
+```
+
+Nothing is spread out of a model. A column added to `Articles` next year
+cannot start appearing in API responses on its own. The article `body` is left
+out deliberately — a list never displays it and it is the largest column.
+
+That omission has a consequence on the client, which is the next thing.
+
+### The article page had to change
+
+`ArticlesPreview` passes the whole article object as router state when you
+click a row. `routes/Article/Article.jsx` used to read that and skip its fetch:
+
+```js
+if (state) return;          // before
+if (state?.body) return;    // after
+```
+
+Because the collection endpoint sends no `body`, the old guard meant an
+article opened from a collection rendered a title with no content and never
+fetched. Three tests cover it: state without a body fetches, state with a body
+does not, and no state fetches.
+
+### Removing an article, and the pager
+
+`handleRemove` calls the same toggle service from journey one, then
+`goToPageAfterRemoval` clamps the page index:
+
+```js
+const remaining = articlesCount - 1;
+const lastPage = Math.max(0, Math.ceil(remaining / PAGE_SIZE) - 1);
+return Math.min(current, lastPage);
+```
+
+Remove the only article on the last page and, without this, the pager would
+point at a page that no longer exists: an empty list under a pager insisting
+there is more. Tested with 11 articles across two pages.
+
+The Remove button itself is one optional prop on the existing
+`ArticlesPreview`:
+
+```jsx
+<ArticlesPreview articles={...} onRemove={handleRemove} removingSlug={removing} />
+```
+
+Without `onRemove`, that component renders exactly as it always did, so the
+home, profile and favourites feeds are untouched.
+
+---
+
+## 4. Journey three: creating and deleting
+
+The third path is the forms, and the thing to understand is why they behave
+differently from the picker.
+
+`routes/Collections/Collections.jsx` and `components/CollectionForm` handle
+create, rename and delete. All three **wait for the server**, with submit
+disabled while the request is in flight:
+
+```jsx
+<button disabled={submitting || !name.trim()} type="submit">
+  {submitting ? "Saving..." : collection ? "Save changes" : "Create"}
+</button>
+```
+
+The picker's toggles were optimistic. These are not, for three reasons. The
+server owns the new collection's id, so there is nothing sensible to render
+until it replies. The server can reject the name, because names are unique per
+user. And a row that appears and then vanishes reads as a bug, in a way that a
+tick that takes 200ms does not.
+
+Disabling submit also means a double-clicked button sends one request. There
+is a test that clicks twice and counts the POSTs.
+
+When the server rejects a name it returns 409 with the message
+`"A collection with that name already exists."`. Because `errorHandler` throws
+the server's own message as a string, the form can render it directly with no
+mapping layer.
+
+Deleting asks for confirmation **inline**, not in a modal:
+
+> Delete this collection? The articles stay where they are.
+
+Inline matches the rest of the app, which has no modals. The wording says what
+a user actually worries about at that moment, which is whether they are about
+to lose the articles. They are not: deleting a collection removes the
+memberships through `ON DELETE CASCADE` and leaves every article alone, and a
+backend test asserts exactly that.
+
+### One note on the picker's styling
+
+The picker is the only genuinely new visual component in the feature.
+Everything else is assembled from `ContainerRow`, `BannerContainer`,
+`FormFieldset`, `.article-preview` rows and the existing button classes. So it
+is the only place where styling decisions had to be made rather than inherited:
+
+- Its CSS is scoped under `.collection-picker` in `collections.css`. Defining
+  `.dropdown-menu` globally would have restyled the navbar user menu, which
+  currently has no styles of its own.
+- It reuses the radius and shadow `.card` already uses. No new visual values,
+  and no hex codes anywhere in the new CSS.
+- Escape and a click outside both close it and return focus to the button that
+  opened it.
+- Its focus ring is drawn with `box-shadow`, because `index.css` contains
+  `button:focus { outline: 0 !important }` and a normal outline would be
+  discarded.
+
+---
+
+## 5. The ground underneath
+
+You have now walked every path. This is the schema they all sit on.
 
 ```
 Users ──< Collections ──< CollectionArticles >── Articles
 ```
 
-**`Collections`** — `id` UUID PK, `userId` (FK, `ON DELETE CASCADE`), `name`
-varchar(60) NOT NULL, `description` varchar(280) NULL, timestamps.
+**`Collections`** — `id` UUID primary key, `userId`, `name` varchar(60) not
+null, `description` varchar(280) nullable, timestamps.
 
-- `CHECK (btrim(name) <> '')` — `NOT NULL` alone still allows `"   "`.
-- `UNIQUE (userId, lower(name))` — a functional index, because Sequelize
-  cannot express `lower(name)`. Two collections called "Reading list" in the
-  save picker would be a coin toss for the user.
-- `ON DELETE CASCADE` on the owner: a deleted user's private lists have no
-  other owner.
+| Constraint | Why |
+| --- | --- |
+| `CHECK (btrim(name) <> '')` | `NOT NULL` on its own still permits `"   "` |
+| `UNIQUE (userId, lower(name))` | Two collections called "Reading list" in the picker would be a coin toss. Functional index, because Sequelize cannot express `lower(name)` |
+| `userId ON DELETE CASCADE` | A deleted user's private lists have no other owner |
 
 **`CollectionArticles`** — `collectionId`, `articleId`, `createdAt`.
 
-- PK `(collectionId, articleId)` — this is the duplicate prevention.
-- No `updatedAt`: a membership is created and removed, never edited.
-- Index `(collectionId, createdAt DESC)` — the detail page reads newest-first
-  and comes straight off this index in display order.
-- Index `(articleId)` — the composite PK starts with `collectionId` and cannot
-  serve the reverse lookup. Without this, deleting a popular article scans the
-  whole membership table to cascade.
+| Feature | Why |
+| --- | --- |
+| Primary key `(collectionId, articleId)` | This *is* the duplicate prevention from journey one |
+| No `updatedAt` | A membership is created and removed, never edited |
+| Index `(collectionId, createdAt DESC)` | The detail page reads newest-first and comes straight off this index in display order |
+| Index `(articleId)` | The primary key starts with `collectionId` and cannot serve the reverse lookup. Without this, deleting a popular article scans the whole table to cascade |
 
-**Why UUIDs for collections but integers for articles.** Article ids are
-already integers and already public through slugs. Collection ids appear in
-URLs for private data, where a sequential id is enumerable and leaks total
-volume. This is defence in depth — the actual control is the owner in the
-`WHERE` clause — but it is free, and it makes an id you were not given useless
-even to guess at.
+**Why UUIDs here but integers for articles.** Article ids are already
+sequential and already effectively public through slugs. Collection ids go in
+URLs for private data, where a sequential id is enumerable and leaks how many
+exist in total. This is a second layer, not the actual control — the actual
+control is the owner in the `WHERE` clause — but it costs nothing.
 
-### The baseline migration
+### The repair that came first
 
 `migrations/20260921100000-baseline-add-missing-associations.js` is not part
-of the feature; it is the repair that made the feature possible.
+of the feature. It is the fix that made the feature possible, and it is worth
+knowing about because it explains a rule in `CLAUDE.md`.
 
-The four original migrations create `Users`, `Articles`, `Comments` and `Tags`
-but **none** of the association columns or join tables — no `Articles.userId`,
-no `Comments.articleId`, no `Favorites`, `Followers` or `TagList`. The app
-worked anyway because `index.js` ran `sequelize.sync({ alter: true })` on
-every boot and quietly added them. A database built from the committed
-migrations alone could not run the app: the article seeder inserts a `userId`
-column that no migration creates.
+The four original migrations create `Users`, `Articles`, `Comments` and
+`Tags` — and none of the association columns or join tables. No
+`Articles.userId`, no `Comments.articleId`, no `Favorites`, `Followers` or
+`TagList`. The app ran anyway, because `index.js` called
+`sequelize.sync({ alter: true })` on every boot and quietly added the missing
+pieces.
 
-The fix adds exactly what `sync()` was building — including the `ON DELETE`
-rules `sync()` actually emitted, which are not the ones the models ask for
-(Sequelize falls back to `SET NULL` for a nullable FK, so `Articles.userId`
-and `Comments.userId` are `SET NULL` despite the models saying `CASCADE`).
-Reproducing the real schema was the goal; changing it would be a behaviour
-change wearing a migration's clothes.
+That meant a database built from the committed migrations alone could not run
+the app. The article seeder inserts into a `userId` column that no migration
+creates.
+
+The new migration adds exactly what `sync()` was building, including the
+`ON DELETE` rules `sync()` actually emitted rather than the ones the models
+ask for. Sequelize falls back to `SET NULL` for a nullable foreign key, so
+`Articles.userId` and `Comments.userId` are `SET NULL` despite their models
+saying `CASCADE`. Reproducing the real schema was the goal. Changing it would
+have been a behaviour change disguised as a migration.
 
 `scripts/verify-baseline-schema.sh` proves it: it builds one database with
-`sync()` and one with the migrations and diffs `pg_dump --schema-only`. The
-diff is empty. Boot no longer calls `sync()` at all, and CI migrates up, all
-the way down, and up again so an irreversible migration fails the build.
+`sync()`, one with the migrations, and diffs `pg_dump --schema-only`. The diff
+is empty.
 
-## 4. The security model
+Boot no longer calls `sync()` at all. CI migrates up, all the way back down,
+and up again, so an irreversible migration fails the build.
 
-The brief asks specifically about horizontal privilege escalation. Here is
-each boundary and what enforces it.
+### The security boundaries, collected
 
-| Boundary | Enforced by | Proven by |
+Journeys one and two showed these individually. Here they are together, with
+what enforces each and what proves it.
+
+| Boundary | Enforced by | Proved by |
 | --- | --- | --- |
-| Anonymous cannot reach any collection route | `router.use(verifyToken, requireAuth)` | every route × three bad-auth cases, driven off the router's route table |
-| A bad or expired token is 401, not 500 | `UnauthorizedError` + JWT error names in `errorHandler` | malformed-token cases in the same test |
-| B cannot read A's collection | `where: { id, userId }` in `findOwnedCollection` | `collections.ownership.test.js` |
-| B cannot write A's collection | same clause; `destroy` and `update` also carry it | ownership tests assert A's rows are unchanged after each attempt |
-| B cannot tell A's collection exists | `NotFoundError`, never `ForbiddenError` | ownership tests assert 404 |
-| A client cannot set the owner | `userId` only ever from `req.loggedUser`; `readWritableFields` whitelists `name` and `description` | body-planting tests on create and update |
-| A client cannot pick the id | `id` is not in the whitelist; the DB default generates it | create test asserts the planted id was not used |
-| No SQL injection | ORM everywhere; the three raw queries use `replacements`; no user value is ever interpolated into `sequelize.literal` | review — the raw queries are all in `loadArticlePage` |
-| No field leakage | responses are constructed by hand, not spread from models; `Collection.toJSON` drops `userId` | a test greps every collection response for `userId`, `email`, `password`, `token`, `body` |
-| Secrets stay out of logs | `errorHandler` logs name/message/stack, never the error object | review |
+| Anonymous cannot reach any collection route | `router.use(verifyToken, requireAuth)` | every route × three bad-auth cases, read off the router's own route table |
+| A bad or expired token is 401, not 500 | `UnauthorizedError` and the JWT error names in `errorHandler` | malformed-token cases in the same test |
+| B cannot read A's collection | `where: { id, userId }` | `collections.ownership.test.js` |
+| B cannot write A's collection | the same clause on `update` and `destroy` | ownership tests re-read A's rows afterwards and assert they are unchanged |
+| B cannot learn A's collection exists | `NotFoundError`, never `ForbiddenError` | ownership tests assert 404 |
+| A client cannot set the owner | `userId` only from `req.loggedUser`; `readWritableFields` whitelists `name` and `description` | body-planting tests on create and update |
+| A client cannot choose the id | `id` is not in the whitelist; the database default generates it | create test asserts the planted id was not used |
+| No SQL injection | ORM throughout; the three raw queries use `replacements` | the raw queries are all in `loadArticlePage` |
+| No field leakage | responses built by hand; `Collection.toJSON` drops `userId` | a test greps every response for `userId`, `email`, `password`, `token`, `body` |
+| Secrets stay out of logs | `errorHandler` logs name, message and stack | review |
 
-**The pattern to preserve.** The reason this is defensible is not that each
-handler remembers to check — it is that *there is no unscoped query to
-forget to scope*. If you write
+---
 
-```js
-const collection = await Collection.findByPk(id);
-if (collection.userId !== req.loggedUser.id) throw new ForbiddenError();
-```
+## 6. Why it is built this way
 
-you have reintroduced both problems: a read that can return someone else's
-row, and a 403 that confirms existence. Keep the owner in the `WHERE` clause.
+Each of these was a real choice with a real alternative. This is the section to
+read before being asked "why did you…".
 
-## 5. Query cost, and why it stays flat
+### `OFFSET` pagination rather than keyset
 
-The existing `/api/articles` handler loops over each article and, per
-article, fetches tags, the author, follow state, follower count, favourite
-state and favourite count — about six queries each.
+**Chose** `LIMIT`/`OFFSET`, offset in rows, capped at 50.
+**Rejected** keyset pagination on `(createdAt, articleId)`.
+**Why** keyset changes the client contract. The client sends a cursor instead
+of a page number, so the pager component, the URL and their tests all change.
+At this size `OFFSET` costs nothing.
+**What it costs** page *n* makes Postgres walk and discard *n* rows. And if an
+article is removed while someone is paging, everything shifts up by one and a
+row gets skipped.
+**When to revisit** when deep pages show up in the latency histogram, or on the
+first report of a missing article while paging. The ordering is already
+unique, so it is close to a drop-in.
 
-Measured on this machine:
+### A computed `articlesCount` rather than a stored counter
 
-| Endpoint | 1 article | 20 articles |
-| --- | --- | --- |
-| `GET /api/articles` (existing) | 9 | **123** |
-| `GET /api/collections/:id/articles` | 7 | **7** |
+**Chose** a `COUNT(*)` subquery per collection.
+**Rejected** a counter column on `Collections`.
+**Why** a counter has to survive `ON DELETE CASCADE` when an article is
+deleted, and a cascade bypasses application code completely. Keeping it honest
+needs a row-level trigger, a backfill and a reconciliation job. A counter that
+drifts silently is worse than a count.
+**When to revisit** when the list endpoint appears in slow queries.
 
-`loadArticlePage` in `services/collections.js` gets there like this:
+### 404 rather than 403 for another user's collection
 
-1. One query for the page of memberships, joined to their articles and
-   authors, ordered and limited.
-2. Bail out if the page is empty — an `IN ()` with no values is a mistake
-   waiting to happen.
-3. Collect `articleIds` and the distinct `authorIds`.
-4. Three queries in parallel, each covering the whole page:
-   - tags: `WHERE "articleId" IN (:articleIds)`
-   - favourites: `COUNT(*)` and `BOOL_OR("userId" = :loggedUserId)`, grouped
-     by article
-   - follows: the same shape over `Followers`, grouped by author
-5. Index the results into `Map`s and assemble the response by hand.
+**Chose** 404.
+**Why** a 403 confirms the id exists, which is an oracle over private data.
+**What it costs** slightly confusing for a legitimate user who lost access,
+which is not a case that exists here because there is no sharing.
+**Worth monitoring** a rising 404 rate on `/api/collections/:id` from one
+source is the signature of someone enumerating ids.
 
-`BOOL_OR(...)` is doing real work: it collapses "how many favourites" and
-"did *I* favourite it" into one aggregate rather than one query for the count
-and another for the membership.
+### Constraints in the database rather than checks in the service
 
-`Favorites`, `Followers` and `TagList` have no Sequelize models — they are
-string-through join tables — so those three are raw SQL. Every value is bound
-through `replacements`; nothing is interpolated.
-
-The ordering is `(createdAt DESC, articleId DESC)`. The tiebreaker is not
-decoration: without it, two articles saved in the same millisecond can swap
-places between page one and page two, so one is shown twice and one never.
-
-A test spies on `sequelize.query` and asserts the count for a 1-article page
-equals the count for a 20-article page. That is the guard against someone
-adding a convenient `await article.getTagList()` inside the map.
-
-## 6. Frontend state
-
-### Hooks
-
-`useCollections` and `useCollectionArticles` follow the shape of the existing
-`useArticles`, with two additions:
-
-**An `error` state.** `useArticles` does `.catch(console.error)`, so a failed
-load renders as an empty list — "you have no collections" and "we could not
-load your collections" look identical to the user. Both new hooks distinguish
-them, and there are tests for each state.
-
-**A staleness guard.** Each effect sets `let current = true` and flips it in
-its cleanup, so only the latest effect can write to state. Without it, a slow
-response for page 2 arriving after page 3 puts page 2's rows on screen while
-the pager still reads 3.
-
-`useCollectionArticles` also owns `goToPageAfterRemoval`, which clamps the
-page index after a removal. Remove the only article on the last page and the
-pager would otherwise point at a page that no longer exists — an empty list
-under a pager claiming there is more. Tested with 11 articles across two
-pages.
-
-### Optimistic vs pessimistic, deliberately
-
-**Pessimistic** — create, rename, delete (`Collections.jsx`, `CollectionForm`).
-The server owns the id and can reject the name; a row that appears and then
-vanishes reads as a bug. Submit is disabled while the request is in flight,
-which as a side effect makes a double-clicked submit send one request — there
-is a test that counts the POSTs.
-
-**Optimistic** — the picker's toggles (`CollectionPicker.jsx`). A checkmark
-has to move under the cursor. The previous value is captured before the call
-so a failure restores both the tick and the count, and the final state comes
-from what the service reports rather than from the guess — a 409 means it was
-already saved, which is not what we optimistically assumed but is the right
-answer.
-
-### The two component changes worth knowing about
-
-**`ArticlesPreview` gained one optional `onRemove` prop.** With it, each row
-renders a Remove button next to the favourite button; without it, the
-component renders exactly as before, so the home, profile and favourites
-feeds are untouched. The first draft of the detail page rendered a *second*
-list of titles beside the previews just to hold the Remove buttons — two
-lists to keep in sync, and every title on screen twice.
-
-**`Article.jsx`'s fetch guard changed from `if (state) return` to
-`if (state?.body) return`.** `ArticlesPreview` passes the whole article as
-router state when a row is clicked, and list endpoints do not include the
-body — the collection endpoint omits it deliberately, since it is the largest
-column and a list never shows it. With the old guard, an article opened from
-a collection rendered a page with a title and no content, and never fetched.
-Three tests cover it: state without a body fetches, state with a body does
-not, no state fetches.
-
-### The picker is the only new visual component
-
-Everything else is assembled from `ContainerRow`, `BannerContainer`,
-`FormFieldset`, `.article-preview` rows and the existing button classes. The
-picker had no pattern to copy, so:
-
-- Its styles are scoped under `.collection-picker` in `collections.css`.
-  Defining `.dropdown-menu` globally would have restyled the navbar user menu,
-  which has no styles of its own.
-- It reuses the radius and shadow `.card` already uses. No new visual values.
-- Escape and outside-click close it and return focus to the trigger.
-- Its focus ring is a `box-shadow`, because `index.css` has
-  `button:focus { outline: 0 !important }`.
-- It mounts its content only while open, which is what makes it re-read
-  membership each time. `ArticlesButtons` renders twice per article page
-  (banner and footer), so cached state in one copy would go stale the moment
-  the other was used. There is a test asserting it refetches on reopen.
-
-## 7. Trade-offs
-
-Each of these is a real decision with a real alternative. This is the section
-to read before being asked "why did you…".
-
-### `OFFSET` pagination instead of keyset
-
-**Chose:** `LIMIT`/`OFFSET`, offset in rows, capped at 50.
-**Rejected:** keyset on `(createdAt, articleId)`.
-**Why:** keyset changes the client contract — the client sends a cursor, not a
-page number — so the pager component, the URL shape and their tests all
-change. At current scale `OFFSET` is free.
-**Cost:** page *n* makes Postgres walk and discard *n* rows, and a removal
-during paging shifts rows so one can be skipped.
-**When to revisit:** deep pages appearing in the latency histogram, or the
-first bug report about a missing article while paging. The ordering is
-already unique, so it is a drop-in.
-
-### Computed `articlesCount` instead of a stored counter
-
-**Chose:** a `COUNT(*)` subquery per collection.
-**Rejected:** a counter column on `Collections`.
-**Why:** a counter has to survive `ON DELETE CASCADE` when an article is
-deleted, which bypasses application code entirely — so it needs a row-level
-trigger, a backfill, and a reconciliation job. A counter that silently drifts
-is worse than a count.
-**When to revisit:** when the list endpoint shows up in slow queries. Trigger
-first, application-level maintenance second.
-
-### 404 instead of 403 for another user's collection
-
-**Chose:** 404.
-**Cost:** slightly confusing for a legitimate user who lost access (not a case
-that exists here — there is no sharing).
-**Why:** a 403 is an existence oracle. Articles keep 403 because they are
-public and there is nothing to hide.
-**Consequence worth monitoring:** a rising 404 rate on `/api/collections/:id`
-from one source is the signature of someone enumerating, and it is in the
-design note as an alert.
-
-### Constraints in the database instead of checks in the service
-
-**Chose:** primary key and unique index.
-**Rejected:** `findOne` then `create`.
-**Why:** check-then-act loses races. The concurrency test would fail against
-the application-level version.
-**Cost:** the error arrives as a Sequelize exception that has to be
+**Chose** primary key and unique index.
+**Rejected** `findOne` then `create`.
+**Why** check-then-act loses races. The concurrency test would fail against the
+application-level version.
+**What it costs** the error arrives as a Sequelize exception that has to be
 translated, which is what `rejectDuplicate` does.
 
-### Extending `errorHandler` to always throw
+### `errorHandler` throwing a plain string
 
-**Chose:** every failure throws; the thrown value is a plain string.
-**Rejected:** throwing a rich `Error` carrying `error.status`.
-**Why:** three existing screens render the thrown value straight into JSX, and
-React will not render an `Error` object. The one caller that needs the status
-reads `error.response.status` itself.
-**Cost:** callers that want structured information have to look at the axios
-error before delegating. That is arguably the better boundary anyway — what a
-409 means is endpoint-specific.
+**Chose** always throw; the thrown value is a string.
+**Rejected** throwing an `Error` carrying `error.status`.
+**Why** three existing screens render the thrown value straight into JSX, and
+React will not render an `Error`.
+**What it costs** callers wanting structured information have to inspect the
+axios error before delegating. That is arguably the better boundary anyway,
+since what a 409 means is specific to each endpoint.
 
 ### Leaving the existing endpoints alone
 
-**Chose:** did not fix the N+1 in `/api/articles`, did not change its
-page-based `offset`, did not fix the seeder's plaintext passwords.
-**Why:** the brief says not to break existing behaviour and warns against
+**Chose** did not fix the N+1 in `/api/articles`, did not change its page-based
+`offset`, did not fix the seeder's plaintext passwords.
+**Why** the brief says not to break existing behaviour and warns against
 unrelated rewrites. The frontend depends on the `offset` semantics today.
-**How it is kept honest:** a characterization test pins the `offset`
-behaviour so the inconsistency is a recorded decision rather than an
-oversight, and every deviation is listed in the README.
+**How it stays honest** a characterization test pins the `offset` behaviour, so
+the inconsistency is a recorded decision rather than an oversight, and every
+deviation is listed in the README.
 
-### The linter is small on purpose
+### A deliberately small linter
 
-**Chose:** recommended rule sets, `react-hooks/set-state-in-effect` as a
+**Chose** the recommended rule sets, `react-hooks/set-state-in-effect` as a
 warning, `react/prop-types` off.
-**Why:** `set-state-in-effect` fires on the data-loading pattern the codebase
+**Why** `set-state-in-effect` fires on the data-loading pattern the codebase
 already uses in `useArticles`, `PopularTags` and `FeedContext`. Making it an
 error would mean re-architecting existing screens. `prop-types` would mean
 annotating every existing component.
-**Result:** `eslint .` exits 0 with six warnings, all pre-existing patterns.
+**Result** `eslint .` exits 0 with six warnings, all pre-existing patterns.
 
-## 8. Debugging playbook
+---
+
+## 7. When something breaks
 
 | Symptom | Look at | Why |
 | --- | --- | --- |
-| Backend test: *"Dialect needs to be explicitly supplied"* | `backend/tests/setupTests.js` | vitest runs from the repo root, so a bare `dotenv.config()` loads the root `.env` (4 compose variables) instead of `backend/.env` (23). The path is pinned for this reason. |
-| Every token rejected, tests pass individually | require order in `setupTests.js` | `helper/jwt.js` reads `JWT_KEY` at require time. Anything requiring it before dotenv gets `undefined`. |
-| *"Vitest cannot be imported in a CommonJS module"* | the test file's imports | Backend is CJS. `globals: true` is set — use bare `describe`/`test`/`expect`/`vi`. |
-| A 500 where a 4xx belongs | `middleware/errorHandler.js` → `statusFor` | An error class with no branch falls through to 500. Add the class, do not special-case the message. |
-| A malformed id produces a 500 | `isUuid` in `services/collections.js` | Postgres raises a type error on a bad UUID. Validate before querying. |
-| Collections list is empty for a user who has some | the `WHERE` clause | Almost always a missing or wrong `userId` scope, or the caller is not who you think. Check `req.loggedUser.id`. |
-| Duplicate rows appeared in a collection | whether something used `collection.addArticle()` | The generated helper `SELECT`s then skips, and races. Use `CollectionArticle.create()`. |
-| Response latency grew with page size | `loadArticlePage` | Something is querying inside the map. The query-count test should have caught it — check it was not skipped. |
-| Article page renders blank after opening from a collection | the guard in `routes/Article/Article.jsx` | List endpoints omit `body`. The guard must be `state?.body`, not `state`. |
-| Frontend test hangs or fails on an unexpected request | MSW handlers in the test | `onUnhandledRequest: "error"` — the component is calling something the test did not stub. |
-| Pager shows a page with nothing on it | `goToPageAfterRemoval` | The page index was not clamped after a removal. |
-| The picker shows stale membership | whether `CollectionPicker` is mounted while closed | It must mount on open; `ArticlesButtons` renders twice per page. |
-| A save "worked" but nothing changed | `helpers/errorHandler.js` | This was the original bug: non-listed statuses were logged and swallowed, so the service resolved `undefined`. It now always throws. |
-| CI fails on a shell script: *bad interpreter* | `.gitattributes` | A Windows checkout rewrote it to CRLF. |
-| Playwright cannot find an element that is visibly there | the URL | The app uses `HashRouter`; every route is `/#/path`. |
-| Playwright cannot find a pager link | the locator | `react-paginate` renders `role="button"` with `aria-label="Page N"`, not a link. |
-| Seeded user cannot log in | `seeders/20220427123216-create-users.js` | Plaintext passwords vs a bcrypt comparison. Pre-existing. Register a new account. |
+| Backend test: *"Dialect needs to be explicitly supplied"* | `backend/tests/setupTests.js` | vitest runs from the repo root, so a bare `dotenv.config()` loads the root `.env` (4 compose variables) instead of `backend/.env` (23). The path is pinned for this reason |
+| Every token rejected, though tests pass individually | require order in `setupTests.js` | `helper/jwt.js` reads `JWT_KEY` at require time. Anything requiring it before dotenv gets `undefined` |
+| *"Vitest cannot be imported in a CommonJS module"* | the test file's imports | The backend is CommonJS. `globals: true` is set, so use bare `describe`/`test`/`expect`/`vi` |
+| A 500 where a 4xx belongs | `errorHandler` → `statusFor` | An error class with no branch falls through to 500. Add the class; do not special-case the message |
+| A malformed id gives 500 | `isUuid` in `services/collections.js` | Postgres raises a type error on a bad UUID. Validate first |
+| A user's collections list is empty when it should not be | the `WHERE` clause | Almost always a missing or wrong `userId` scope, or the caller is not who you think. Check `req.loggedUser.id` |
+| Duplicate rows in a collection | whether something used `collection.addArticle()` | The generated helper `SELECT`s, then skips, and races. Use `CollectionArticle.create()` |
+| Latency grows with page size | `loadArticlePage` | Something is querying inside the map. The query-count test should have caught it, so check it was not skipped |
+| Article page blank when opened from a collection | the guard in `routes/Article/Article.jsx` | List endpoints omit `body`. The guard must be `state?.body`, not `state` |
+| Frontend test hangs or fails on an unexpected request | the MSW handlers in that test | `onUnhandledRequest: "error"` — the component is calling something the test did not stub |
+| Pager shows an empty page | `goToPageAfterRemoval` | The page index was not clamped after a removal |
+| The picker shows stale membership | whether `CollectionPicker` stays mounted while closed | It must mount on open; `ArticlesButtons` renders twice per page |
+| A save "worked" but nothing changed | `helpers/errorHandler.js` | The original bug: unlisted statuses were logged and swallowed, so the service resolved `undefined` |
+| CI fails on a shell script: *bad interpreter* | `.gitattributes` | A Windows checkout rewrote it to CRLF |
+| Playwright cannot find an element that is visibly there | the URL | The app uses `HashRouter`, so every route is `/#/path` |
+| Playwright cannot find a pager link | the locator | `react-paginate` renders `role="button"` with `aria-label="Page N"`, not a link |
+| A seeded user cannot log in | `seeders/20220427123216-create-users.js` | Plaintext passwords against a bcrypt comparison. Pre-existing; register a new account |
 
-## 9. Making a small change
+---
 
-Worked recipes for the kinds of change most likely to come up.
+## 8. Evidence
 
-### Add a field to a collection (say, `isPinned`)
+These numbers came from running the code, not from estimating. Re-run them
+after a change rather than trusting the table.
 
-1. **Migration** — a new file in `backend/migrations/`, `addColumn` with a
-   default so existing rows are valid, and a `down` that removes it. Never
-   edit an applied migration.
+| Claim | How it was produced | Result |
+| --- | --- | --- |
+| Migrations reproduce the pre-existing schema | `./scripts/verify-baseline-schema.sh` | empty diff, 114 lines each side |
+| Collection page cost is flat | spy on `sequelize.query`, 1 vs 20 articles | 7 and 7 |
+| The existing endpoint is N+1 | the same method on `/api/articles` | 9 and 123 |
+| Concurrent duplicate adds | `Promise.all` of two adds | one 201, one 409, one row |
+| Constraints are in the database | raw `INSERT` of a duplicate; `Collection.create` with a blank name | both rejected |
+| No field leakage | every collection response stringified and pattern-matched | no `userId`, `email`, `password`, `token` or `body` |
+| Tests do not depend on order | `npx vitest run --sequence.shuffle` | passes |
+| The flow works in a browser | Playwright against the production build | login → create → save → view → remove → empty state |
+
+Suite sizes: **110 backend**, **48 frontend**, **2 end-to-end**.
+
+---
+
+## 9. Changing it
+
+### Add a field to a collection, say `isPinned`
+
+1. **Migration** — new file in `backend/migrations/`, `addColumn` with a
+   default so existing rows stay valid, and a `down` that removes it. Never
+   edit a migration that has already run.
 2. **Model** — add it to `Collection.init`, with a validator if it has rules.
-3. **Whitelist** — add it to `readWritableFields` in `services/collections.js`.
-   *If you skip this it silently will not save*, which is the whitelist doing
-   its job.
+3. **Whitelist** — add it to `readWritableFields`. Skip this and it will
+   silently fail to save, which is the whitelist doing its job.
 4. **Read path** — add it to the `attributes` arrays in `listCollections` and
-   `findOwnedCollection`. They are explicit lists, not `SELECT *`.
+   `findOwnedCollection`. Those are explicit lists, not `SELECT *`.
 5. **Tests** — one that it round-trips, one that an invalid value is 422.
-6. **Frontend** — `CollectionForm` for the input, `Collections.jsx` to display.
-7. `npm run lint && npm test`, and confirm `db:migrate:undo:all` then
+6. **Frontend** — `CollectionForm` for the input, `Collections.jsx` to show it.
+7. Run `npm run lint && npm test`, and check `db:migrate:undo:all` followed by
    `db:migrate` still works.
 
-### Add a route to the collections router
+### Add a route
 
-Add it to `routes/collections.js` — auth is inherited from `router.use`, so
-do not add it per route. The auth test picks the new route up automatically
-from the router's route table, but its assertion that there are eight routes
-will fail: update the count, which is the prompt to confirm the new route
-really should be there. Then the controller, then the service — and the
-service function takes `userId` as its first concern and puts it in the
+Add it to `routes/collections.js`. Auth is inherited from `router.use`, so do
+not add it per route. The auth test picks the new route up automatically, but
+its assertion that there are eight routes will fail — update the count, which
+is your prompt to confirm the route really should exist. Then the controller,
+then the service. The service function takes `userId` first and puts it in the
 `WHERE` clause.
 
 ### Change the page size
 
 `PAGE_LIMIT_DEFAULT` in `services/collections.js` and `PAGE_SIZE` in
-`hooks/useCollectionArticles.js`. They are separate because the server's
-default protects the API from a client that sends nothing, and the client's
-value is a display choice. `PAGE_LIMIT_MAX` caps what a client may ask for;
-raising it changes the worst case a single request can cost.
+`hooks/useCollectionArticles.js`. They are separate on purpose: the server's
+default protects the API from a client that sends nothing, the client's value
+is a display choice. `PAGE_LIMIT_MAX` caps what a client may ask for, so
+raising it raises the worst case a single request can cost.
 
 ### Switch to keyset pagination
 
 The ordering `(createdAt DESC, articleId DESC)` is already unique, so:
 
-1. Accept `before` (an encoded `createdAt` + `articleId`) instead of `offset`
-   in `parsePagination`.
+1. Accept `before` (an encoded `createdAt` plus `articleId`) instead of
+   `offset` in `parsePagination`.
 2. In `loadArticlePage`, replace `offset` with
    `WHERE (createdAt, articleId) < (:beforeCreatedAt, :beforeArticleId)`.
-   Postgres compares row constructors lexicographically, so this is one
-   condition and the existing index serves it.
+   Postgres compares row constructors lexicographically, so that is one
+   condition and the existing index already serves it.
 3. Return the last row's cursor in the response.
-4. Swap `react-paginate` for a "load more" or prev/next control —
-   **this is the real cost**, not the SQL.
-5. Keep `articlesCount` for the total; it is independent of how pages are cut.
+4. Replace `react-paginate` with prev/next or "load more". **This is the real
+   cost**, not the SQL.
+5. Keep `articlesCount`; it is independent of how pages are cut.
 
-### Let users reorder articles in a collection
+### Let users reorder articles
 
 Add a `position` column to `CollectionArticles`, order by
 `(position, createdAt DESC, articleId DESC)`, and extend the index to match.
-The ordering already having a stable tiebreaker is what makes this safe to
-add.
+The ordering already having a stable tiebreaker is what makes this safe.
 
-## 10. Evidence
+---
 
-Numbers here came from running the code, not from estimating. Re-run them
-after a change rather than trusting this table.
+## 10. What is not done
 
-| Claim | How it was produced | Result |
-| --- | --- | --- |
-| Migrations reproduce the pre-existing schema exactly | `./scripts/verify-baseline-schema.sh` | empty diff, 114 lines each |
-| Collection page cost is flat | spy on `sequelize.query`, 1 vs 20 articles | 7 and 7 |
-| Existing endpoint is N+1 | same method on `/api/articles` | 9 and 123 |
-| Concurrent duplicate adds | `Promise.all` of two adds | one 201, one 409, one row |
-| Constraints are in the database | raw `INSERT` of a duplicate; `Collection.create` with a blank name | both rejected |
-| No field leakage | every collection response stringified and pattern-matched | no `userId`, `email`, `password`, `token`, `body` |
-| Tests do not depend on order | `npx vitest run --sequence.shuffle` | passes |
-| The whole flow works in a browser | Playwright against the production build | login → create → save → view → remove → empty state |
-
-Suite sizes: **110 backend**, **48 frontend**, **2 end-to-end**.
-
-## 11. Where the bodies are buried
-
-Honest list of what is wrong, unfinished, or deliberately left alone. Nothing
-here is a surprise waiting for a reviewer.
-
-**Left alone on purpose** (out of scope; changing them would break or churn
-existing behaviour):
+**Left alone deliberately**, because changing them would break or churn
+existing behaviour:
 
 - `/api/articles` and `/api/articles/feed` are still N+1.
 - `offset` means pages there and rows here.
-- Seeded users cannot log in (plaintext passwords vs bcrypt).
+- Seeded users cannot log in — plaintext passwords against bcrypt.
 - `styles.css` asks for the Lora font; `index.html` never loads it.
 - `DELETE /api/articles/:slug/comments/:commentId` ignores the slug. Ownership
-  is still checked, so it is untidy, not exploitable.
+  is still checked, so it is untidy rather than exploitable.
 - `Articles.userId` and `Comments.userId` are `ON DELETE SET NULL`, matching
-  what the running schema always had, not what the models say.
+  what the running schema always had rather than what the models say.
 
-**Not done, and would be next:**
+**Not built, and next in line:**
 
 - Keyset pagination and a stored counter.
 - Rate limits on collection writes.
 - Saving from a feed preview rather than only an article page.
-- Collections cannot be searched, sorted or reordered.
-- No `Cache-Control: private, no-store` header is set yet — it is argued for
-  in the design note but not implemented.
+- Search, sort and manual reordering of collections.
+- The `Cache-Control: private, no-store` header argued for in the design note.
 
-**Things a reviewer might reasonably push back on:**
+**Fair things for a reviewer to push on:**
 
 - The picker creates a collection and saves into it in **two** requests, so a
-  failure between them leaves an empty collection. A single endpoint, or a
-  transaction, would be better; two requests reuses two tested paths and the
-  failure mode is benign.
-- `goToPageAfterRemoval` derives the new page from `articlesCount` held in the
-  hook, which is one render behind if two removals overlap. Removal is
-  disabled per row while in flight, so it does not occur in practice, but it
-  is a state machine that could be tightened.
-- The frontend `errorHandler` throwing a bare string is not what most
-  codebases do. It is the right call *here* because three existing screens
-  render the thrown value directly, but it is a constraint inherited from the
-  starter, not a preference.
+  failure between them leaves an empty collection. One endpoint, or a
+  transaction, would be better. Two requests reuse two already-tested paths
+  and the failure mode is harmless.
+- `goToPageAfterRemoval` derives the new page from an `articlesCount` held in
+  the hook, which is one render behind if two removals overlap. Removal is
+  disabled per row while in flight so it does not happen in practice, but the
+  state machine could be tighter.
+- `errorHandler` throwing a bare string is not what most codebases do. It is
+  right *here* because three existing screens render the thrown value
+  directly, but it is a constraint inherited from the starter, not a
+  preference.
