@@ -240,6 +240,7 @@ got past it.
 | `Article.jsx` skipped its fetch whenever router state existed. List endpoints do not send the article body, so an article opened from a collection rendered an empty page | Fetches when `state.body` is missing |
 | No linter and no CI | Added a small ESLint flat config and one GitHub Actions workflow |
 | A Windows checkout rewrote `scripts/init-test-db.sh` to CRLF, which `/bin/sh` cannot run | Added `.gitattributes` normalising to LF |
+| `npm run dev` failed on Windows. The script quoted its sub-commands with single quotes, which `cmd.exe` does not treat as quoting, so `'npm run dev -w backend'` was parsed as five separate tokens | Switched to double quotes, which quote correctly in both `cmd.exe` and POSIX shells |
 
 ## Known limitations
 
