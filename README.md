@@ -241,6 +241,7 @@ got past it.
 | No linter and no CI | Added a small ESLint flat config and one GitHub Actions workflow |
 | A Windows checkout rewrote `scripts/init-test-db.sh` to CRLF, which `/bin/sh` cannot run | Added `.gitattributes` normalising to LF |
 | `npm run dev` failed on Windows. The script quoted its sub-commands with single quotes, which `cmd.exe` does not treat as quoting, so `'npm run dev -w backend'` was parsed as five separate tokens | Switched to double quotes, which quote correctly in both `cmd.exe` and POSIX shells |
+| The Vite dev server had no `strictPort`, so if 3000 was busy it moved to the next free port - 3001, the backend's. `/api` then proxied to the dev server itself, every request looped back in, and the process ran out of sockets with `ENOBUFS` instead of reporting a port clash | `strictPort: true` on both `server` and `preview`, so a busy port fails immediately with `Port 3000 is already in use` |
 
 ## Known limitations
 
