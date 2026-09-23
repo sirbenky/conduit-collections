@@ -1,7 +1,5 @@
 # Conduit with private article collections
 
-[![CI](https://github.com/sirbenky/conduit-collections/actions/workflows/ci.yml/badge.svg)](https://github.com/sirbenky/conduit-collections/actions/workflows/ci.yml)
-
 A RealWorld/Conduit implementation (React + Vite, Express, Sequelize,
 PostgreSQL) extended with **private article collections**: named lists of
 articles that only their owner can see or change.
